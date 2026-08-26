@@ -6,8 +6,14 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 import io
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from pdf2image import convert_from_bytes
+from pdf2image.pdfinfo import pdfinfo_from_bytes
+import platform
+
+# Automatically set Tesseract path ONLY if running on a local Windows PC.
+# On Render (Linux), it will skip this and use the global installation.
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # --- 1. Helper Parsing Functions ---
 def is_company_name(line):
@@ -173,14 +179,12 @@ def style_worksheet(ws):
     alt_fill = PatternFill("solid", fgColor="F9F9F9")
     border = Border(left=Side(style='thin', color='D3D3D3'), right=Side(style='thin', color='D3D3D3'), top=Side(style='thin', color='D3D3D3'), bottom=Side(style='thin', color='D3D3D3'))
 
-    # Style Header
     for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = border
 
-    # Style Rows & Apply Alternating Colors
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column), start=2):
         for cell in row:
             cell.border = border
@@ -188,7 +192,6 @@ def style_worksheet(ws):
             if row_idx % 2 == 0:
                 cell.fill = alt_fill
 
-    # Set Column Widths
     for col_letter in ['A', 'B', 'V', 'W', 'X', 'Y', 'Z', 'AA']: ws.column_dimensions[col_letter].width = 30
     for col_letter in ['C', 'D', 'E', 'F', 'G', 'H', 'I']: ws.column_dimensions[col_letter].width = 20
     for col_letter in ['J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U']: ws.column_dimensions[col_letter].width = 15
@@ -198,7 +201,6 @@ def style_worksheet(ws):
 def create_styled_excel(df):
     wb = Workbook()
     
-    # -- Sheet 1: Main Data --
     ws_main = wb.active
     ws_main.title = "Enhanced Directory Data"
     
@@ -207,17 +209,12 @@ def create_styled_excel(df):
         ws_main.append(row)
     style_worksheet(ws_main)
 
-    # -- Sheet 2: Duplicate Companies Only --
-    # Temporarily normalize names to catch case-insensitive duplicates
     df['normalized_name'] = df['Company Name'].str.strip().str.upper()
-    # Filter for duplicates (keep=False ensures we keep ALL instances of the duplicate)
     duplicates_df = df[df.duplicated(subset=['normalized_name'], keep=False)].drop(columns=['normalized_name'])
-    df = df.drop(columns=['normalized_name']) # Cleanup main df just in case
+    df = df.drop(columns=['normalized_name']) 
     
-    # Sort them so matching duplicate branches group together visually
     duplicates_df = duplicates_df.sort_values(by=['Company Name'])
     
-    # Only create the duplicates sheet if duplicates exist
     if not duplicates_df.empty:
         ws_dupes = wb.create_sheet("Duplicate Companies")
         ws_dupes.append(list(duplicates_df.columns))
@@ -225,7 +222,6 @@ def create_styled_excel(df):
             ws_dupes.append(row)
         style_worksheet(ws_dupes)
 
-    # Save to buffer
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -240,44 +236,59 @@ uploaded_file = st.file_uploader("Upload Scanned PDF", type=["pdf"])
 
 if uploaded_file is not None:
     if st.button("Extract and Convert"):
-        with st.spinner("Converting PDF pages to images & running OCR (this may take a minute)..."):
-            try:
-                # IMPORTANT: If you are running locally on Windows and need the Tesseract Path, keep this line. 
-                # If deploying to Streamlit Cloud, comment this out!
-                pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        
+        pdf_bytes = uploaded_file.read()
+        
+        try:
+            # Get total number of pages SAFELY without loading them all into memory
+            info = pdfinfo_from_bytes(pdf_bytes)
+            total_pages = info["Pages"]
+            
+            st.success(f"PDF accepted. Detected {total_pages} pages.")
+            
+            # Setup visual progress indicators
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            extracted_text = ""
+            
+            # --- MEMORY OPTIMIZATION ---
+            # Extract exactly ONE page at a time to prevent Render from crashing
+            for page_num in range(1, total_pages + 1):
+                status_text.text(f"Running OCR on Page {page_num} of {total_pages}...")
+                
+                # Convert only the specific page to an image
+                images = convert_from_bytes(pdf_bytes, first_page=page_num, last_page=page_num, dpi=300)
+                
+                # Extract text
+                text = pytesseract.image_to_string(images[0])
+                extracted_text += text + "\n"
+                
+                # Update progress bar
+                progress = int((page_num / total_pages) * 100)
+                progress_bar.progress(progress)
+            
+            status_text.text("OCR Complete! Structuring data now...")
 
-                # Convert PDF to images
-                images = convert_from_bytes(uploaded_file.read())
-                
-                # Run OCR on each image
-                extracted_text = ""
-                for i, image in enumerate(images):
-                    text = pytesseract.image_to_string(image)
-                    extracted_text += text + "\n"
-                
-                if not extracted_text.strip():
-                    st.error("No text could be extracted from the PDF. Please ensure the scan quality is clear.")
-                else:
-                    st.success(f"Successfully extracted text from {len(images)} pages. Parsing data now...")
+            if not extracted_text.strip():
+                st.error("No text could be extracted from the PDF. Please ensure the scan quality is clear.")
+            else:
+                with st.spinner("Structuring and formatting data into Excel..."):
+                    df = parse_directory_text(extracted_text)
+                    excel_buffer = create_styled_excel(df)
                     
-                    with st.spinner("Structuring and formatting data into Excel..."):
-                        # Parse the text
-                        df = parse_directory_text(extracted_text)
-                        
-                        # Generate Excel
-                        excel_buffer = create_styled_excel(df)
-                        
-                        st.success(f"Processing Complete! Successfully parsed {len(df)} companies.")
-                        
-                        st.download_button(
-                            label="📥 Download Formatted Excel File",
-                            data=excel_buffer,
-                            file_name="Structured_Directory_Data.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        
-                        st.subheader("Data Preview (Main Table)")
-                        st.dataframe(df.head())
-                        
-            except Exception as e:
-                st.error(f"An error occurred during processing: {e}")
+                    status_text.empty()
+                    st.success(f"Processing Complete! Successfully parsed {len(df)} companies.")
+                    
+                    st.download_button(
+                        label="📥 Download Formatted Excel File",
+                        data=excel_buffer,
+                        file_name="Structured_Directory_Data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+                    st.subheader("Data Preview (Main Table)")
+                    st.dataframe(df.head())
+                    
+        except Exception as e:
+            st.error(f"An error occurred during processing: {e}")
