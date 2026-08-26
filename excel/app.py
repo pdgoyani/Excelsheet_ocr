@@ -6,8 +6,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 import io
 import pytesseract
-from pdf2image import convert_from_bytes
-from pdf2image.pdfinfo import pdfinfo_from_bytes
+from pdf2image import convert_from_bytes, pdfinfo_from_bytes
 import platform
 
 # Automatically set Tesseract path ONLY if running on a local Windows PC.
